@@ -1,0 +1,975 @@
+---
+# Install NextCloud on a naked Debian Buster
+# 2020 by Christian Blechert <christian@serverless.industries>
+# https://serverless.industries
+# License: MIT
+#
+# Workflow:
+# - Set hostname in hosts on top of the playbook
+# - Tweak the other vars if needed
+#
+# The defined accounts will be created with the given password.
+# The playbook will take care of this.
+# You only need to provide valid SMTP credentials from your mail provider
+#
+# - Ensure 'manualnextcloudinstalldone' is set to false
+# - Run the playbook
+#
+# Now the playbook will install only the dependencies and
+# download the setup for nextcloud into your domain root
+#
+# - Open https://yourdomain.com/install-nextcloud-please.php
+# - Do the setup as usual (you defined the mysql credentials in this playbook, so use them. :-)
+# - Set the 'manualnextcloudinstalldone' is set to true
+# - Run the playbook again
+#
+# The playbook will now set the very basic settings in nextcloud by the nextcloud CLI
+# for example SMTP server and collabora server URL
+#
+# - Done
+#
+
+- name: Install NextCloud on Debian Buster
+  hosts:
+    - cloud.example.com
+
+  vars:
+
+    # domain names
+    baseurl: 'https://cloud.example.com'
+    domains:
+      - cloud.example.com
+      - cloud.example.de
+
+    # acme
+    acmeuser: letsencrypt
+    acmehome: /home/letsencrypt
+    acmeworkdir: /home/letsencrypt/html
+
+    # directories
+    wwwuserhome: /var/www/virtual/nextcloud
+    nextcloudbase: /var/www/virtual/nextcloud/public
+    nextclouddata: /mnt/by-label-cloud/nextcloud/data
+
+    # other settings
+    nextclouddownloadurl: 'https://download.nextcloud.com/server/installer/setup-nextcloud.php'
+    phptimezone: 'Europe/Berlin'
+    collaborelanguages: 'en_GB en_US de_DE'
+
+    # name for unix users/groups and mariadb user
+    usergroup: www-nextcloud
+
+    # mariadb password
+    dbpassword: XXXXXXXXXXXXXXXXXXXXXXXXX
+
+    # smtp credencials
+    smtp:
+      sendername: cloud
+      senderdomain: exmaple.com
+      host: mailserver.example.com
+      port: '587'
+      username: XXXXXXXXXXXXXXXXX
+      password: XXXXXXXXXXXXXXXXX
+
+    # dont care about change status, enforce a service restart
+    enforcerestart: true
+
+    # set this to false first!
+    # set this to true when nextcloud was installed manually
+    # in browser by /install-nextcloud-please.php
+    manualnextcloudinstalldone: true
+
+    maintenance_defaults: &maintenance_defaults
+      become: yes
+      become_user: "{{usergroup}}"
+      shell: >-
+        php occ maintenance:mode --{{maintenance_state}}
+      args:
+        chdir: "{{nextcloudbase}}"
+        executable: /bin/bash
+      when: manualnextcloudinstalldone
+      tags:
+        - dependencies
+        - packages
+        - mariadb
+        - redis
+        - php
+        - collabora
+        - nginx
+
+  tasks:
+
+    #
+    # -> Maintenance mode
+    #
+
+    - <<: *maintenance_defaults
+      name: Enable maintenance mode
+      vars:
+        maintenance_state: 'on'
+
+
+    #
+    # -> Install packages
+    #
+
+    - name: Install LNMP stack packages
+      apt:
+        force_apt_get: yes
+        update_cache: yes
+        cache_valid_time: 3600
+        name:
+          # webserver & php
+          - nginx-full
+          - php7.3-bcmath
+          - php7.3-cli
+          - php7.3-curl
+          - php7.3-fpm
+          - php7.3-gd
+          - php7.3-imap
+          - php7.3-intl
+          - php7.3-json
+          - php7.3-mbstring
+          - php7.3-mysql
+          - php7.3-xml
+          - php7.3-zip
+          - php7.3-gmp
+          - php-imagick
+          - imagemagick
+          - php-redis
+          - php-apcu
+          # nextcloud dependencies
+          - mariadb-server
+          - redis-server
+          - openssl
+          - python3-pip
+          - python3-setuptools
+          - python-pip
+          - python-setuptools
+          - dirmngr
+          # collabora dependencies
+          - locales
+          - tzdata
+          - console-data
+          - console-setup
+          - hunspell-de-de
+          - hunspell-en-us
+      register: pkginstall
+      tags:
+        - dependencies
+        - packages
+
+    - name: Install pip packages
+      pip:
+        name: "{{item}}"
+      loop:
+        # ansible dependencies
+        - PyMySQL
+      tags:
+        - dependencies
+        - packages
+
+
+    #
+    # -> Nextcloud Web Process User
+    #
+
+    - name: Nextcloud Group
+      group:
+        name: "{{usergroup}}"
+        system: yes
+      tags:
+        - nextcloud
+
+    - name: Nextcloud User
+      user:
+        append: yes
+        create_home: yes
+        group: "{{usergroup}}"
+        groups:
+          - "{{usergroup}}"
+        home: "{{wwwuserhome}}"
+        name: "{{usergroup}}"
+        shell: /bin/bash
+        system: yes
+      tags:
+        - nextcloud
+
+    - name: Create directories
+      file:
+        path: "{{item}}"
+        owner: "{{usergroup}}"
+        group: "{{usergroup}}"
+        mode: u=rwx,g=rx,o=-
+        state: directory
+      loop:
+        - "{{nextcloudbase}}"
+      tags:
+        - nextcloud
+
+    - name: Create data directory
+      file:
+        path: "{{nextclouddata}}"
+        owner: "{{usergroup}}"
+        group: "{{usergroup}}"
+        mode: u=rwx,go=rx
+        state: directory
+        recurse: yes
+      tags:
+        - nextcloud
+
+
+    #
+    # -> MariaDB
+    #
+
+    - name: Create MariaDB db
+      mysql_db:
+        login_unix_socket: /var/run/mysqld/mysqld.sock
+        login_user: root
+        name: "{{usergroup}}"
+      tags:
+        - dependencies
+        - mariadb
+
+    - name: Create MariaDB user
+      mysql_user:
+        login_unix_socket: /var/run/mysqld/mysqld.sock
+        login_user: root
+        name: "{{usergroup}}"
+        password: "{{dbpassword}}"
+        priv: "{{usergroup}}.*:ALL"
+      tags:
+        - dependencies
+        - mariadb
+
+
+    #
+    # -> Redis
+    #
+
+    - name: Enable and start redis service
+      service:
+        name: redis-server
+        enabled: yes
+        state: "{{ 'restarted' if enforcerestart else 'started' }}"
+      tags:
+        - dependencies
+        - redis
+
+
+    #
+    # -> PHP-FPM
+    #
+
+    - name: Remove default fpm pool
+      file:
+        path: /etc/php/7.3/fpm/pool.d/www.conf
+        state: absent
+      register: fpmwww
+      tags:
+        - dependencies
+        - php
+
+    - name: Create nextcloud fpm pool
+      copy:
+        owner: root
+        group: root
+        mode: u=rw,go=r
+        dest: /etc/php/7.3/fpm/pool.d/nextcloud.conf
+        content: |
+          [nextcloud]
+          user = {{usergroup}}
+          group = {{usergroup}}
+          listen = 127.0.0.1:9001
+
+          pm = dynamic
+          pm.max_children = 120
+          pm.start_servers = 12
+          pm.min_spare_servers = 6
+          pm.max_spare_servers = 18
+
+          env[PATH] = /usr/local/bin:/usr/bin:/bin
+
+          php_admin_value[memory_limit] = 512M
+          php_admin_value[max_execution_time] = 120
+          php_admin_value[post_max_size] = 520M
+          php_admin_value[upload_max_filesize] = 512M
+
+          php_admin_value[opcache.interned_strings_buffer] = 8
+          php_admin_value[opcache.max_accelerated_files] = 10000
+          php_admin_value[opcache.memory_consumption] = 128
+          php_admin_value[opcache.save_comments] = 1
+          php_admin_value[opcache.revalidate_freq] = 1
+
+          ; eof
+      register: fpmnextcloud
+      tags:
+        - dependencies
+        - php
+
+    - name: Set php.ini properties for cli and fpm
+      lineinfile:
+        path: "{{item[0]}}"
+        regexp: "{{item[1].rgx}}"
+        line: "{{item[1].value}}"
+      # create a product out of {{files}} and {{values}}
+      # apply all values to all files
+      loop: "{{ files | product(values) | list }}"
+      vars:
+        files:
+          - /etc/php/7.3/cli/php.ini
+          - /etc/php/7.3/fpm/php.ini
+        values:
+          - { rgx: '^[\s;]*date\.timezone\s*=', value: "date.timezone = {{phptimezone}}" }
+          - { rgx: '^[\s;]*curl\.cainfo\s*=', value: 'curl.cainfo = /etc/ssl/certs/ca-certificates.crt' }
+      register: fpmini
+      tags:
+        - dependencies
+        - php
+
+    - name: Restart php-fpm
+      service:
+        name: php7.3-fpm
+        state: restarted
+      when: >-
+        enforcerestart
+        or pkginstall.changed
+        or fpmwww.changed
+        or fpmnextcloud.changed
+        or True in (fpmini.results | map(attribute='changed') | list)
+      tags:
+        - dependencies
+        - php
+
+
+    #
+    # -> Collabora Online
+    #
+
+    - name: Add an apt key by id from a keyserver
+      apt_key:
+        keyserver: keyserver.ubuntu.com
+        id: 0C54D189F4BA284D
+      tags:
+        - dependencies
+        - collabora
+
+    - name: Add collabora repo
+      apt_repository:
+        filename: collaboracode
+        repo: 'deb https://www.collaboraoffice.com/repos/CollaboraOnline/CODE-debian10 ./'
+      tags:
+        - dependencies
+        - collabora
+
+    - name: Install collabora
+      apt:
+        force_apt_get: yes
+        update_cache: yes
+        cache_valid_time: 3600
+        name:
+          - loolwsd
+          - code-brand
+      register: collaborainstall
+      tags:
+        - dependencies
+        - collabora
+
+    - name: Configure collabora
+      shell: >-
+        loolconfig set "{{item.name}}" "{{item.value}}"
+      args:
+        executable: /bin/bash
+      loop:
+        - { name: 'allowed_languages', value: "{{collaborelanguages}}" }
+        - { name: 'ssl.enable', value: 'false' }
+        - { name: 'ssl.termination', value: 'true' }
+        - { name: 'storage.wopi.host', value: "{{domains[0]}}" }
+        - { name: 'net.listen', value: "loopback" }
+        - { name: 'net.proto', value: "IPv4" }
+      tags:
+        - dependencies
+        - collabora
+
+    - name: Enable and start collabora service
+      service:
+        name: loolwsd
+        enabled: yes
+        state: "{{ 'restarted' if enforcerestart or collaborainstall.changed else 'started' }}"
+      tags:
+        - dependencies
+        - collabora
+
+
+    #
+    # -> Install acme.sh
+    #
+
+    - name: acme Group
+      group:
+        name: "{{acmeuser}}"
+        system: yes
+      tags:
+        - dependencies
+        - acmesh
+
+    - name: acme User
+      user:
+        append: yes
+        create_home: yes
+        group: "{{acmeuser}}"
+        groups:
+          - "{{acmeuser}}"
+        home: "{{acmehome}}"
+        name: "{{acmeuser}}"
+        shell: /bin/bash
+        system: yes
+      tags:
+        - dependencies
+        - acmesh
+
+    - name: Check if acme.sh is installed
+      stat:
+        path: "{{acmehome}}/.acme.sh"
+      register: isacme
+      tags:
+        - dependencies
+        - acmesh
+
+    - name: Install acme.sh
+      become: yes
+      become_user: "{{acmeuser}}"
+      shell: >-
+        curl https://get.acme.sh | sh
+      args:
+        chdir: "{{acmehome}}"
+        executable: /bin/bash
+      when: (isacme.stat.exists and isacme.stat.isdir) == False
+      tags:
+        - dependencies
+        - acmesh
+
+    - name: Update acme.sh
+      become: yes
+      become_user: "{{acmeuser}}"
+      shell: >-
+        {{acmehome}}/.acme.sh/acme.sh --upgrade
+      args:
+        chdir: "{{acmehome}}"
+        executable: /bin/bash
+      when: (isacme.stat.exists and isacme.stat.isdir) == True
+      tags:
+        - dependencies
+        - acmesh
+
+    - name: Create webserver directory
+      file:
+        path: "{{acmeworkdir}}"
+        owner: "{{acmeuser}}"
+        group: "{{acmeuser}}"
+        mode: u=rwx,go=rx
+        state: directory
+      tags:
+        - dependencies
+        - acmesh
+
+    - name: Allow acme.sh to reload NGINX
+      copy:
+        dest: /etc/sudoers.d/acme
+        owner: root
+        group: root
+        mode: u=rw,g=r,o=-
+        content: |
+          {{acmeuser}}    ALL=(ALL) NOPASSWD: /bin/systemctl reload nginx
+        validate: 'visudo -cf %s'
+      tags:
+        - dependencies
+        - acmesh
+
+
+    #
+    # -> Configure NGINX base and prepare for acme.sh
+    #
+
+    - name: Add NGINX to nextcloud group
+      user:
+        name: "www-data"
+        append: yes
+        groups:
+          - "{{usergroup}}"
+      tags:
+        - dependencies
+        - nginx
+
+    - name: Generate dhparam
+      openssl_dhparam:
+        owner: root
+        group: root
+        mode: u=rw,go=-
+        path: /etc/ssl/dhparam.pem
+        size: 4096
+        state: present
+        force: no
+      tags:
+        - dependencies
+        - nginx
+
+    - name: NGINX config
+      copy:
+        owner: root
+        group: root
+        mode: u=rw,go=r
+        dest: /etc/nginx/nginx.conf
+        content: |
+          user www-data;
+          worker_processes auto;
+          pid /run/nginx.pid;
+          include /etc/nginx/modules-enabled/*.conf;
+
+          events {
+              worker_connections 768;
+              # multi_accept on;
+          }
+
+          http {
+              sendfile on;
+              tcp_nopush on;
+              tcp_nodelay on;
+              keepalive_timeout 65;
+              types_hash_max_size 2048;
+              server_tokens on;
+
+              include /etc/nginx/mime.types;
+              default_type application/octet-stream;
+
+              ssl_session_timeout 1d;
+              ssl_session_cache shared:MozSSL:10m;  # about 40000 sessions
+              ssl_session_tickets off;
+              ssl_protocols TLSv1.2 TLSv1.3;
+              ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384;
+              ssl_prefer_server_ciphers off;
+              ssl_stapling on;
+              ssl_stapling_verify on;
+              add_header Strict-Transport-Security "max-age=63072000" always;
+              ssl_dhparam /etc/ssl/dhparam.pem;
+
+              resolver 9.9.9.9;
+
+              access_log /var/log/nginx/access.log;
+              error_log /var/log/nginx/error.log;
+
+              gzip on;
+              include /etc/nginx/conf.d/*.conf;
+              include /etc/nginx/sites-enabled/*;
+          }
+
+          # eof
+      register: nginxconf
+      tags:
+        - dependencies
+        - nginx
+
+    - name: NGINX default site
+      copy:
+        owner: root
+        group: root
+        mode: u=rw,go=r
+        dest: /etc/nginx/sites-available/default
+        content: |
+          server {
+              listen 80 default_server;
+              listen [::]:80 default_server;
+
+              server_name _;
+
+              location / {
+                  add_header Content-Type "text/plain" always;
+                  return 200 "Default website";
+              }
+          }
+
+          # eof
+      register: nginxdefaultconf
+      tags:
+        - dependencies
+        - nginx
+
+    - name: NGINX enable default site
+      file:
+        path: /etc/nginx/sites-enabled/default
+        src: /etc/nginx/sites-available/default
+        state: link
+      register: nginxdefaultenable
+      tags:
+        - dependencies
+        - nginx
+
+    - name: NGINX nextcloud TLS redirect site
+      copy:
+        owner: root
+        group: root
+        mode: u=rw,go=r
+        dest: /etc/nginx/sites-available/nextcloud-tls-redirect
+        content: |
+          server {
+              listen 80;
+              listen [::]:80;
+              server_name {{domains|join(' ')}};
+
+              location / {
+                  # Enforce HTTPS
+                  return 302 https://$server_name$request_uri;
+              }
+
+              location /.well-known {
+                  alias {{acmeworkdir}}/.well-known;
+              }
+          }
+
+          # eof
+      register: nginxnextcloudredir
+      tags:
+        - dependencies
+        - nginx
+
+    - name: NGINX nextcloud site
+      copy:
+        owner: root
+        group: root
+        mode: u=rw,go=r
+        dest: /etc/nginx/sites-available/nextcloud
+        content: |
+          upstream php-handler {
+              server 127.0.0.1:9001;
+          }
+
+          server {
+              listen 443      ssl http2;
+              listen [::]:443 ssl http2;
+              server_name {{domains|join(' ')}};
+
+              ssl_certificate     {{acmehome}}/.acme.sh/{{domains[0]}}/fullchain.cer;
+              ssl_certificate_key {{acmehome}}/.acme.sh/{{domains[0]}}/{{domains[0]}}.key;
+
+              # set max upload size
+              client_max_body_size 512M;
+              fastcgi_buffers 64 4K;
+
+              # Enable gzip but do not remove ETag headers
+              gzip on;
+              gzip_vary on;
+              gzip_comp_level 4;
+              gzip_min_length 256;
+              gzip_proxied expired no-cache no-store private no_last_modified no_etag auth;
+              gzip_types application/atom+xml application/javascript application/json application/ld+json application/manifest+json application/rss+xml application/vnd.geo+json application/vnd.ms-fontobject application/x-font-ttf application/x-web-app-manifest+json application/xhtml+xml application/xml font/opentype image/bmp image/svg+xml image/x-icon text/cache-manifest text/css text/plain text/vcard text/vnd.rim.location.xloc text/vtt text/x-component text/x-cross-domain-policy;
+
+              # HTTP response headers borrowed from Nextcloud `.htaccess`
+              add_header Referrer-Policy                      "no-referrer"   always;
+              add_header X-Content-Type-Options               "nosniff"       always;
+              add_header X-Download-Options                   "noopen"        always;
+              add_header X-Frame-Options                      "SAMEORIGIN"    always;
+              add_header X-Permitted-Cross-Domain-Policies    "none"          always;
+              add_header X-Robots-Tag                         "none"          always;
+              add_header X-XSS-Protection                     "1; mode=block" always;
+              add_header Strict-Transport-Security "max-age=63072000" always;
+
+              fastcgi_hide_header X-Powered-By;
+
+              root {{nextcloudbase}};
+              index index.php index.html /index.php$request_uri;
+              expires 1m;
+
+              # BEGIN collabora online
+
+              # static files
+              location ^~ /loleaflet {
+                  proxy_pass http://localhost:9980;
+                  proxy_set_header Host $http_host;
+              }
+
+              # WOPI discovery URL
+              location ^~ /hosting/discovery {
+                  proxy_pass http://localhost:9980;
+                  proxy_set_header Host $http_host;
+              }
+
+              # Capabilities
+              location ^~ /hosting/capabilities {
+                  proxy_pass http://localhost:9980;
+                  proxy_set_header Host $http_host;
+              }
+
+              # main websocket
+              location ~ ^/lool/(.*)/ws$ {
+                  proxy_pass http://localhost:9980;
+                  proxy_set_header Upgrade $http_upgrade;
+                  proxy_set_header Connection "Upgrade";
+                  proxy_set_header Host $http_host;
+                  proxy_read_timeout 36000s;
+              }
+
+              # download, presentation and image upload
+              location ~ ^/lool {
+                  proxy_pass http://localhost:9980;
+                  proxy_set_header Host $http_host;
+              }
+
+              # END collabora online
+
+              # Rule borrowed from `.htaccess` to handle Microsoft DAV clients
+              location = / {
+                  if ( $http_user_agent ~ ^DavClnt ) {
+                      return 302 /remote.php/webdav/$is_args$args;
+                  }
+              }
+
+              location = /robots.txt {
+                  allow all;
+                  log_not_found off;
+                  access_log off;
+              }
+
+              location ^~ /.well-known {
+                  rewrite ^/\.well-known/host-meta\.json  /public.php?service=host-meta-json  last;
+                  rewrite ^/\.well-known/host-meta        /public.php?service=host-meta       last;
+                  rewrite ^/\.well-known/webfinger        /public.php?service=webfinger       last;
+                  rewrite ^/\.well-known/nodeinfo         /public.php?service=nodeinfo        last;
+                  location = /.well-known/carddav     { return 301 /remote.php/dav/; }
+                  location = /.well-known/caldav      { return 301 /remote.php/dav/; }
+                  try_files $uri $uri/ =404;
+              }
+
+              location ~ ^/(?:build|tests|config|lib|3rdparty|templates|data)(?:$|/)  { return 404; }
+              location ~ ^/(?:\.|autotest|occ|issue|indie|db_|console)              { return 404; }
+
+              location ~ \.php(?:$|/) {
+                  fastcgi_split_path_info ^(.+?\.php)(/.*)$;
+                  set $path_info $fastcgi_path_info;
+
+                  try_files $fastcgi_script_name =404;
+
+                  include fastcgi_params;
+                  fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+                  fastcgi_param PATH_INFO $path_info;
+                  fastcgi_param HTTPS on;
+
+                  fastcgi_param modHeadersAvailable true;         # Avoid sending the security headers twice
+                  fastcgi_param front_controller_active true;     # Enable pretty urls
+                  fastcgi_pass php-handler;
+
+                  fastcgi_intercept_errors on;
+                  fastcgi_request_buffering off;
+              }
+
+              location ~ \.(?:css|js|svg|gif)$ {
+                  try_files $uri /index.php$request_uri;
+                  expires 6M;         # Cache-Control policy borrowed from `.htaccess`
+                  access_log off;     # Optional: Don't log access to assets
+              }
+
+              location ~ \.woff2?$ {
+                  try_files $uri /index.php$request_uri;
+                  expires 7d;         # Cache-Control policy borrowed from `.htaccess`
+                  access_log off;     # Optional: Don't log access to assets
+              }
+
+              location / {
+                  try_files $uri $uri/ /index.php$request_uri;
+              }
+          }
+
+          # eof
+      register: nginxnextcloudconf
+      tags:
+        - dependencies
+        - nginx
+
+    - name: NGINX enable nextcloud TLS redirect site
+      file:
+        path: /etc/nginx/sites-enabled/nextcloud-tls-redirect
+        src: /etc/nginx/sites-available/nextcloud-tls-redirect
+        state: link
+      register: nginxnextcloudredirenable
+      tags:
+        - dependencies
+        - nginx
+
+    - name: Check if certificate exists
+      stat:
+        path: "{{acmehome}}/.acme.sh/{{domains[0]}}/fullchain.cer"
+      register: iscert
+      tags:
+        - dependencies
+        - acmesh
+        - nginx
+
+    - name: Restart NGINX
+      service:
+        name: nginx
+        state: restarted
+      when: >-
+        enforcerestart
+        or pkginstall.changed
+        or nginxconf.changed
+        or nginxdefaultconf.changed
+        or nginxdefaultenable.changed
+        or nginxnextcloudredir.changed
+        or nginxnextcloudredirenable.changed
+        or nginxtlstoggled.changed
+      tags:
+        - dependencies
+        - acmesh
+        - nginx
+
+
+    #
+    # -> TLS Certificate
+    #
+
+    - name: Issue certificate
+      become: yes
+      become_user: "{{acmeuser}}"
+      shell: >-
+        {{acmehome}}/.acme.sh/acme.sh
+        --issue -d "{{domains|join('" -d "')}}"
+        -w "{{acmeworkdir}}"
+        --reloadcmd "sudo /bin/systemctl reload nginx"
+      args:
+        chdir: "{{acmehome}}"
+        executable: /bin/bash
+      register: issue_cmd
+      failed_when: issue_cmd.rc!=0 and issue_cmd.rc!=2
+      changed_when: issue_cmd.rc==0
+      tags:
+        - dependencies
+        - acmesh
+
+    - name: Enable TLS website in NGINX
+      file:
+        src: /etc/nginx/sites-available/nextcloud
+        path: /etc/nginx/sites-enabled/nextcloud
+        state: link
+      register: nginxtlsyes
+      when: issue_cmd.rc==0 or issue_cmd.rc==2
+      tags:
+        - dependencies
+        - acmesh
+
+    - name: Restart NGINX
+      service:
+        name: nginx
+        state: restarted
+      when: >-
+        enforcerestart
+        or nginxafteracmetoggled.changed
+      tags:
+        - dependencies
+        - acmesh
+
+
+    #
+    # -> Nextcloud config
+    #
+
+    - name: Download nextcloud installer
+      get_url:
+        url: "{{nextclouddownloadurl}}"
+        dest: "{{nextcloudbase}}/install-nextcloud-please.php"
+        owner: "{{usergroup}}"
+        group: "{{usergroup}}"
+        mode: u=rw,go=r
+      when: manualnextcloudinstalldone == False
+      tags:
+        - nextcloud
+
+    - name: Ensure nextcloud installer is deleted
+      file:
+        path: "{{nextcloudbase}}/install-nextcloud-please.php"
+        state: absent
+      when: manualnextcloudinstalldone
+      tags:
+        - nextcloud
+
+    - name: Create cronjob for nextcloud
+      cron:
+        name: nextcloud
+        cron_file: nextcloud
+        user: "{{usergroup}}"
+        minute: "*/5"
+        job: >-
+          php --define apc.enable_cli=1 -f {{nextcloudbase}}/cron.php
+      when: manualnextcloudinstalldone
+      tags:
+        - nextcloud
+
+    - name: Configure nextcloud
+      become: yes
+      become_user: "{{usergroup}}"
+      shell: >-
+        php occ "config:{{item.category}}:set" {{item.key}} --value="{{item.value}}"
+      args:
+        chdir: "{{nextcloudbase}}"
+        executable: /bin/bash
+      loop:
+        # system
+        - { category: 'system', key: 'datadirectory', value: "{{nextclouddata}}" }
+        - { category: 'system', key: 'default_locale', value: 'de_DE' }
+        - { category: 'system', key: 'default_language', value: 'de' }
+        - { category: 'system', key: 'overwrite.cli.url', value: "{{baseurl}}" }
+        - { category: 'system', key: 'dbtype', value: 'mysql' }
+        - { category: 'system', key: 'dbhost', value: "localhost" }
+        - { category: 'system', key: 'dbname', value: "{{usergroup}}" }
+        - { category: 'system', key: 'dbuser', value: "{{usergroup}}" }
+        - { category: 'system', key: 'dbpassword', value: "{{dbpassword}}" }
+        # caches
+        - { category: 'system', key: 'memcache.local', value: '\OC\Memcache\APCu' }
+        - { category: 'system', key: 'memcache.distributed', value: '\OC\Memcache\Redis' }
+        - { category: 'system', key: 'memcache.locking', value: '\OC\Memcache\Redis' }
+        - { category: 'system', key: 'redis host', value: '127.0.0.1' }
+        - { category: 'system', key: 'redis port', value: '6379' }
+        # mail
+        - { category: 'system', key: 'mail_smtpmode', value: 'smtp' }
+        - { category: 'system', key: 'mail_smtphost', value: "{{smtp.host}}" }
+        - { category: 'system', key: 'mail_smtpport', value: "{{smtp.port}}" }
+        - { category: 'system', key: 'mail_smtpsecure', value: 'tls' }
+        - { category: 'system', key: 'mail_smtpauth', value: 'true' }
+        - { category: 'system', key: 'mail_smtpauthtype', value: 'PLAIN' }
+        - { category: 'system', key: 'mail_smtpname', value: "{{smtp.username}}" }
+        - { category: 'system', key: 'mail_smtppassword', value: "{{smtp.password}}" }
+        - { category: 'system', key: 'mail_domain', value: "{{smtp.senderdomain}}" }
+        - { category: 'system', key: 'mail_from_address', value: "{{smtp.sendername}}" }
+        # core
+        - { category: 'app', key: 'core backgroundjobs_mode', value: 'cron' }
+        # apps
+        - { category: 'app', key: 'richdocuments enabled', value: 'yes' }
+        - { category: 'app', key: 'richdocuments public_wopi_url', value: "{{baseurl}}" }
+        - { category: 'app', key: 'richdocuments wopi_url', value: "{{baseurl}}" }
+      when: manualnextcloudinstalldone
+      tags:
+        - nextcloud
+
+    - name: Configure nextcloud - Add trusted domains
+      become: yes
+      become_user: "{{usergroup}}"
+      shell: >-
+        php occ "config:system:set" trusted_domains {{item_index}} --value="{{item}}"
+      args:
+        chdir: "{{nextcloudbase}}"
+        executable: /bin/bash
+      loop: "{{domains}}"
+      loop_control:
+        index_var: item_index
+      when: manualnextcloudinstalldone
+      tags:
+        - nextcloud
+
+
+    #
+    # -> Disable maintenance mode
+    #
+
+    - <<: *maintenance_defaults
+      name: Enable maintenance mode
+      vars:
+        maintenance_state: 'off'
