@@ -1,17 +1,12 @@
 ---
-# Install NextCloud on a naked Debian Buster
-# 2020 by Christian Blechert <christian@serverless.industries>
+# Install NextCloud on a naked Debian Bookworm
+# 2024 by Christian Blechert <christian@serverless.industries>
 # https://serverless.industries
 # License: MIT
 #
 # Workflow:
 # - Set hostname in hosts on top of the playbook
 # - Tweak the other vars if needed
-#
-# The defined accounts will be created with the given password.
-# The playbook will take care of this.
-# You only need to provide valid SMTP credentials from your mail provider
-#
 # - Ensure 'manualnextcloudinstalldone' is set to false
 # - Run the playbook
 #
@@ -29,7 +24,7 @@
 # - Done
 #
 
-- name: Install NextCloud on Debian Buster
+- name: Install NextCloud on Debian Bookworm
   hosts:
     - cloud.example.com
 
@@ -39,7 +34,10 @@
     baseurl: 'https://cloud.example.com'
     domains:
       - cloud.example.com
-      - cloud.example.de
+
+    # # webserver cert
+    # tlscert: /etc/letsencrypt/anyserver.net/fullchain.cer
+    # tlskey: /etc/letsencrypt/anyserver.net/anyserver.net.key
 
     # acme
     acmeuser: letsencrypt
@@ -60,16 +58,16 @@
     usergroup: www-nextcloud
 
     # mariadb password
-    dbpassword: XXXXXXXXXXXXXXXXXXXXXXXXX
+    dbpassword: XXXXXXXXXXXXXXXXXXXXXX
 
     # smtp credencials
     smtp:
-      sendername: cloud
-      senderdomain: exmaple.com
-      host: mailserver.example.com
+      sendername: no-reply+nextcloud
+      senderdomain: example.com
+      host: mail.example.com
       port: '587'
-      username: XXXXXXXXXXXXXXXXX
-      password: XXXXXXXXXXXXXXXXX
+      username: no-reply@example.com
+      password: XXXXXXXXXXXXXXXXXXXXX
 
     # dont care about change status, enforce a service restart
     enforcerestart: true
@@ -79,11 +77,13 @@
     # in browser by /install-nextcloud-please.php
     manualnextcloudinstalldone: true
 
+    usemaintenancemode: no
+
     maintenance_defaults: &maintenance_defaults
       become: yes
       become_user: "{{usergroup}}"
       shell: >-
-        php occ maintenance:mode --{{maintenance_state}}
+        php --define apc.enable_cli=1 occ maintenance:mode --{{maintenance_state}}
       args:
         chdir: "{{nextcloudbase}}"
         executable: /bin/bash
@@ -107,6 +107,7 @@
       name: Enable maintenance mode
       vars:
         maintenance_state: 'on'
+      when: usemaintenancemode
 
 
     #
@@ -121,21 +122,22 @@
         name:
           # webserver & php
           - nginx-full
-          - php7.3-bcmath
-          - php7.3-cli
-          - php7.3-curl
-          - php7.3-fpm
-          - php7.3-gd
-          - php7.3-imap
-          - php7.3-intl
-          - php7.3-json
-          - php7.3-mbstring
-          - php7.3-mysql
-          - php7.3-xml
-          - php7.3-zip
-          - php7.3-gmp
+          - php7.4-bcmath
+          - php7.4-cli
+          - php7.4-curl
+          - php7.4-fpm
+          - php7.4-gd
+          - php7.4-imap
+          - php7.4-intl
+          - php7.4-json
+          - php7.4-mbstring
+          - php7.4-mysql
+          - php7.4-xml
+          - php7.4-zip
+          - php7.4-gmp
           - php-imagick
           - imagemagick
+          - libmagickcore-6.q16-6-extra
           - php-redis
           - php-apcu
           # nextcloud dependencies
@@ -144,8 +146,8 @@
           - openssl
           - python3-pip
           - python3-setuptools
-          - python-pip
-          - python-setuptools
+          #- python-pip
+          #- python-setuptools
           - dirmngr
           # collabora dependencies
           - locales
@@ -264,7 +266,7 @@
 
     - name: Remove default fpm pool
       file:
-        path: /etc/php/7.3/fpm/pool.d/www.conf
+        path: /etc/php/7.4/fpm/pool.d/www.conf
         state: absent
       register: fpmwww
       tags:
@@ -276,7 +278,7 @@
         owner: root
         group: root
         mode: u=rw,go=r
-        dest: /etc/php/7.3/fpm/pool.d/nextcloud.conf
+        dest: /etc/php/7.4/fpm/pool.d/nextcloud.conf
         content: |
           [nextcloud]
           user = {{usergroup}}
@@ -318,8 +320,8 @@
       loop: "{{ files | product(values) | list }}"
       vars:
         files:
-          - /etc/php/7.3/cli/php.ini
-          - /etc/php/7.3/fpm/php.ini
+          - /etc/php/7.4/cli/php.ini
+          - /etc/php/7.4/fpm/php.ini
         values:
           - { rgx: '^[\s;]*date\.timezone\s*=', value: "date.timezone = {{phptimezone}}" }
           - { rgx: '^[\s;]*curl\.cainfo\s*=', value: 'curl.cainfo = /etc/ssl/certs/ca-certificates.crt' }
@@ -330,7 +332,7 @@
 
     - name: Restart php-fpm
       service:
-        name: php7.3-fpm
+        name: php7.4-fpm
         state: restarted
       when: >-
         enforcerestart
@@ -341,65 +343,6 @@
       tags:
         - dependencies
         - php
-
-
-    #
-    # -> Collabora Online
-    #
-
-    - name: Add an apt key by id from a keyserver
-      apt_key:
-        keyserver: keyserver.ubuntu.com
-        id: 0C54D189F4BA284D
-      tags:
-        - dependencies
-        - collabora
-
-    - name: Add collabora repo
-      apt_repository:
-        filename: collaboracode
-        repo: 'deb https://www.collaboraoffice.com/repos/CollaboraOnline/CODE-debian10 ./'
-      tags:
-        - dependencies
-        - collabora
-
-    - name: Install collabora
-      apt:
-        force_apt_get: yes
-        update_cache: yes
-        cache_valid_time: 3600
-        name:
-          - loolwsd
-          - code-brand
-      register: collaborainstall
-      tags:
-        - dependencies
-        - collabora
-
-    - name: Configure collabora
-      shell: >-
-        loolconfig set "{{item.name}}" "{{item.value}}"
-      args:
-        executable: /bin/bash
-      loop:
-        - { name: 'allowed_languages', value: "{{collaborelanguages}}" }
-        - { name: 'ssl.enable', value: 'false' }
-        - { name: 'ssl.termination', value: 'true' }
-        - { name: 'storage.wopi.host', value: "{{domains[0]}}" }
-        - { name: 'net.listen', value: "loopback" }
-        - { name: 'net.proto', value: "IPv4" }
-      tags:
-        - dependencies
-        - collabora
-
-    - name: Enable and start collabora service
-      service:
-        name: loolwsd
-        enabled: yes
-        state: "{{ 'restarted' if enforcerestart or collaborainstall.changed else 'started' }}"
-      tags:
-        - dependencies
-        - collabora
 
 
     #
@@ -486,6 +429,68 @@
       tags:
         - dependencies
         - acmesh
+
+
+    #
+    # -> Collabora Online
+    #
+
+    - name: Add an apt key by id from a keyserver
+      apt_key:
+        keyserver: keyserver.ubuntu.com
+        id: 0C54D189F4BA284D
+      tags:
+        - dependencies
+        - collabora
+
+    - name: Add collabora repo
+      apt_repository:
+        filename: collaboracode
+        repo: 'deb https://www.collaboraoffice.com/repos/CollaboraOnline/CODE-debian11 ./'
+      tags:
+        - dependencies
+        - collabora
+
+    - name: Install collabora
+      apt:
+        force_apt_get: yes
+        update_cache: yes
+        cache_valid_time: 3600
+        name:
+          - coolwsd
+          - code-brand
+      register: collaborainstall
+      tags:
+        - dependencies
+        - collabora
+
+    - name: Configure collabora
+      shell: >-
+        loolconfig set "{{item.name}}" "{{item.value}}"
+      args:
+        executable: /bin/bash
+      loop:
+        - { name: 'allowed_languages', value: "{{collaborelanguages}}" }
+        - { name: 'ssl.enable', value: 'false' }
+        - { name: 'ssl.termination', value: 'true' }
+        - { name: 'ssl.cert_file_path', value: "/home/letsencrypt/.acme.sh/cloud.example.com/cloud.example.com.cer" }
+        - { name: 'ssl.key_file_path', value: "/home/letsencrypt/.acme.sh/cloud.example.com/cloud.example.com.key" }
+        - { name: 'ssl.ca_file_path', value: "/home/letsencrypt/.acme.sh/cloud.example.com/ca.cer" }
+        - { name: 'storage.wopi.host', value: "{{domains[0]}}" }
+        - { name: 'net.listen', value: "loopback" }
+        - { name: 'net.proto', value: "IPv4" }
+      tags:
+        - dependencies
+        - collabora
+
+    - name: Enable and start collabora service
+      service:
+        name: coolwsd
+        enabled: yes
+        state: "{{ 'restarted' if enforcerestart or collaborainstall.changed else 'started' }}"
+      tags:
+        - dependencies
+        - collabora
 
 
     #
@@ -622,8 +627,8 @@
                   return 302 https://$server_name$request_uri;
               }
 
-              location /.well-known {
-                  alias {{acmeworkdir}}/.well-known;
+              location /.well-known/acme-challenge {
+                  alias {{acmeworkdir}}/.well-known/acme-challenge;
               }
           }
 
@@ -683,7 +688,7 @@
               # BEGIN collabora online
 
               # static files
-              location ^~ /loleaflet {
+              location ^~ /browser {
                   proxy_pass http://localhost:9980;
                   proxy_set_header Host $http_host;
               }
@@ -701,7 +706,7 @@
               }
 
               # main websocket
-              location ~ ^/lool/(.*)/ws$ {
+              location ~ ^/cool/(.*/ws|adminws)$ {
                   proxy_pass http://localhost:9980;
                   proxy_set_header Upgrade $http_upgrade;
                   proxy_set_header Connection "Upgrade";
@@ -710,7 +715,7 @@
               }
 
               # download, presentation and image upload
-              location ~ ^/lool {
+              location ~ ^/cool {
                   proxy_pass http://localhost:9980;
                   proxy_set_header Host $http_host;
               }
@@ -731,12 +736,9 @@
               }
 
               location ^~ /.well-known {
-                  rewrite ^/\.well-known/host-meta\.json  /public.php?service=host-meta-json  last;
-                  rewrite ^/\.well-known/host-meta        /public.php?service=host-meta       last;
-                  rewrite ^/\.well-known/webfinger        /public.php?service=webfinger       last;
-                  rewrite ^/\.well-known/nodeinfo         /public.php?service=nodeinfo        last;
                   location = /.well-known/carddav     { return 301 /remote.php/dav/; }
                   location = /.well-known/caldav      { return 301 /remote.php/dav/; }
+                  location ^~ /.well-known            { return 301 /index.php$uri; }
                   try_files $uri $uri/ =404;
               }
 
@@ -832,6 +834,7 @@
       become_user: "{{acmeuser}}"
       shell: >-
         {{acmehome}}/.acme.sh/acme.sh
+        --server letsencrypt
         --issue -d "{{domains|join('" -d "')}}"
         -w "{{acmeworkdir}}"
         --reloadcmd "sudo /bin/systemctl reload nginx"
@@ -907,7 +910,7 @@
       become: yes
       become_user: "{{usergroup}}"
       shell: >-
-        php occ "config:{{item.category}}:set" {{item.key}} --value="{{item.value}}"
+        php --define apc.enable_cli=1 occ "config:{{item.category}}:set" {{item.key}} --value="{{item.value}}"
       args:
         chdir: "{{nextcloudbase}}"
         executable: /bin/bash
@@ -916,6 +919,7 @@
         - { category: 'system', key: 'datadirectory', value: "{{nextclouddata}}" }
         - { category: 'system', key: 'default_locale', value: 'de_DE' }
         - { category: 'system', key: 'default_language', value: 'de' }
+        - { category: 'system', key: 'default_phone_region', value: 'DE' }
         - { category: 'system', key: 'overwrite.cli.url', value: "{{baseurl}}" }
         - { category: 'system', key: 'dbtype', value: 'mysql' }
         - { category: 'system', key: 'dbhost', value: "localhost" }
@@ -953,7 +957,7 @@
       become: yes
       become_user: "{{usergroup}}"
       shell: >-
-        php occ "config:system:set" trusted_domains {{item_index}} --value="{{item}}"
+        php --define apc.enable_cli=1 occ "config:system:set" trusted_domains {{item_index}} --value="{{item}}"
       args:
         chdir: "{{nextcloudbase}}"
         executable: /bin/bash
@@ -973,3 +977,4 @@
       name: Enable maintenance mode
       vars:
         maintenance_state: 'off'
+      when: usemaintenancemode
