@@ -1,6 +1,6 @@
 # nextcloud-ansible
 
-Full bootstrap of Nextcloud on a naked Debian Buster.
+Full bootstrap of Nextcloud on a naked Debian Bookworm.
 
 ## Install components
 
